@@ -1,0 +1,1 @@
+/mnt/c/Users/Sean/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/MonitorSwitch.ahk
