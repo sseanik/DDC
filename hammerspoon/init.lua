@@ -104,7 +104,11 @@ local monitors = {
     },
     s27 = {
         name = "S27",
-        manual = true,  -- DisplayLink: DDC input switching not supported
+        remote = true,  -- DisplayLink: DDC not supported, switch via Windows PC
+        remoteHost = "192.168.1.104",
+        remotePort = 9867,
+        macInput = "HDMI",
+        toggle = { HDMI = "DP", DP = "HDMI" },
     },
     u32 = {
         name = "U32",
@@ -189,6 +193,23 @@ local function ddcWrite(mon, fromLabel, toLabel)
     end, {"display", "uuid=" .. mon.uuid, "set", "input", tostring(writeValue)}):start()
 end
 
+-- Remote input switching (via HTTP to Windows PC)
+local function remoteSwitch(mon)
+    local fromLabel, toLabel = resolveToggle(mon, lastKnownInput[mon.name])
+    local url = string.format("http://%s:%d/switch?monitor=%s&to=%s",
+        mon.remoteHost, mon.remotePort, mon.name, toLabel)
+    print("[monitor] " .. mon.name .. ": remote request " .. fromLabel .. " → " .. toLabel)
+    hs.http.asyncGet(url, nil, function(status, body)
+        if status == 200 then
+            lastKnownInput[mon.name] = toLabel
+            hs.alert.show(mon.name .. ": " .. fromLabel .. " → " .. toLabel, 1)
+        else
+            hs.alert.show(mon.name .. " remote failed (HTTP " .. tostring(status) .. ")", 1.5)
+        end
+        releaseLock(mon)
+    end)
+end
+
 -- BetterDisplay input switching (for DisplayLink displays)
 local function betterDisplaySwitch(mon)
     local fromLabel, toLabel = resolveToggle(mon, lastKnownInput[mon.name])
@@ -227,9 +248,8 @@ end
 local function toggleMonitorInput(mon)
     if not acquireLock(mon) then return end
 
-    if mon.manual then
-        hs.alert.show(mon.name .. ": use OSD (DisplayLink)", 1)
-        releaseLock(mon)
+    if mon.remote then
+        remoteSwitch(mon)
     elseif mon.useBetterDisplay then
         betterDisplaySwitch(mon)
     else
