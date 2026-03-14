@@ -146,9 +146,16 @@ RemoteMap := Map(
 StartHttpServer() {
     global HttpSocket, HttpPort
     HttpSocket := Socket()
-    HttpSocket.Bind(HttpPort)
-    HttpSocket.Listen()
-    SetTimer(HttpAccept, 100)
+    HttpSocket.SetReuseAddr()
+    if !HttpSocket.Bind(HttpPort) {
+        ShowTip("HTTP server failed to bind port " HttpPort)
+        return
+    }
+    if !HttpSocket.Listen() {
+        ShowTip("HTTP server failed to listen")
+        return
+    }
+    SetTimer(HttpAccept, 250)
 }
 
 HttpAccept() {
@@ -156,6 +163,7 @@ HttpAccept() {
     client := HttpSocket.Accept()
     if !client
         return
+    client.SetRecvTimeout(2000)
     ; Read request (small buffer is fine for our simple GET requests)
     data := client.Recv(1024)
     if !data {
@@ -218,16 +226,28 @@ class Socket {
         this.sock := sock ? sock : DllCall("ws2_32\socket", "Int", 2, "Int", 1, "Int", 6, "Ptr")
     }
 
+    SetReuseAddr() {
+        optval := Buffer(4, 0)
+        NumPut("UInt", 1, optval, 0)
+        DllCall("ws2_32\setsockopt", "Ptr", this.sock, "Int", 0xFFFF, "Int", 0x0004, "Ptr", optval, "Int", 4, "Int")
+    }
+
+    SetRecvTimeout(ms) {
+        tv := Buffer(4, 0)
+        NumPut("UInt", ms, tv, 0)
+        DllCall("ws2_32\setsockopt", "Ptr", this.sock, "Int", 0xFFFF, "Int", 0x1006, "Ptr", tv, "Int", 4, "Int")
+    }
+
     Bind(port) {
         addr := Buffer(16, 0)
         NumPut("UShort", 2, addr, 0)           ; AF_INET
         NumPut("UShort", this._htons(port), addr, 2)
         NumPut("UInt", 0, addr, 4)              ; INADDR_ANY
-        DllCall("ws2_32\bind", "Ptr", this.sock, "Ptr", addr, "Int", 16, "Int")
+        return DllCall("ws2_32\bind", "Ptr", this.sock, "Ptr", addr, "Int", 16, "Int") = 0
     }
 
     Listen() {
-        DllCall("ws2_32\listen", "Ptr", this.sock, "Int", 5, "Int")
+        return DllCall("ws2_32\listen", "Ptr", this.sock, "Int", 5, "Int") = 0
     }
 
     Accept() {
