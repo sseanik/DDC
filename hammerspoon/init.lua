@@ -124,8 +124,8 @@ local monitors = {
 local monitorLocks = {}      -- name → true if locked
 local monitorWatchdogs = {}  -- name → hs.timer (watchdog for stuck operations)
 local lastKnownInput = {}    -- name → last successful input label
-local COOLDOWN_SEC = 2       -- debounce cooldown after lock release
-local WATCHDOG_SEC = 5       -- max time before force-unlocking
+local COOLDOWN_SEC = 0.5     -- debounce cooldown after lock release
+local WATCHDOG_SEC = 3       -- max time before force-unlocking
 local lastSwitchTime = {}    -- name → hs.timer.secondsSinceEpoch() of last unlock
 
 local function acquireLock(mon)
@@ -177,11 +177,11 @@ local function resolveToggle(mon, currentInput)
     return mon.macInput .. "*", mon.toggle[mon.macInput]
 end
 
--- DDC write via m1ddc
+-- DDC write via m1ddc (with nil guard)
 local function ddcWrite(mon, fromLabel, toLabel)
     local writeValue = mon.writeMap[toLabel]
     print("[monitor] " .. mon.name .. ": writing input=" .. tostring(writeValue) .. " (" .. fromLabel .. " → " .. toLabel .. ")")
-    hs.task.new(m1ddc, function(exitCode)
+    local task = hs.task.new(m1ddc, function(exitCode)
         print("[monitor] " .. mon.name .. ": m1ddc write exit=" .. tostring(exitCode))
         if exitCode == 0 then
             lastKnownInput[mon.name] = toLabel
@@ -190,59 +190,50 @@ local function ddcWrite(mon, fromLabel, toLabel)
             hs.alert.show(mon.name .. " switch failed (" .. fromLabel .. " → " .. toLabel .. ")", 1.5)
         end
         releaseLock(mon)
-    end, {"display", "uuid=" .. mon.uuid, "set", "input", tostring(writeValue)}):start()
+    end, {"display", "uuid=" .. mon.uuid, "set", "input", tostring(writeValue)})
+    if task then
+        task:start()
+    else
+        hs.alert.show(mon.name .. ": m1ddc not found", 1.5)
+        releaseLock(mon)
+    end
 end
 
 -- Remote input switching (via HTTP to Windows PC)
+-- Uses /toggle endpoint — Windows reads the current input and toggles it,
+-- avoiding state desync when switching from the Windows side
+local REMOTE_TIMEOUT_SEC = 2
 local function remoteSwitch(mon)
-    local fromLabel, toLabel = resolveToggle(mon, lastKnownInput[mon.name])
-    local url = string.format("http://%s:%d/switch?monitor=%s&to=%s",
-        mon.remoteHost, mon.remotePort, mon.name, toLabel)
-    print("[monitor] " .. mon.name .. ": remote request " .. fromLabel .. " → " .. toLabel)
+    local url = string.format("http://%s:%d/toggle?monitor=%s",
+        mon.remoteHost, mon.remotePort, mon.name)
+    print("[monitor] " .. mon.name .. ": remote toggle request")
+    local responded = false
     hs.http.asyncGet(url, nil, function(status, body)
-        if status == 200 then
-            lastKnownInput[mon.name] = toLabel
-            hs.alert.show(mon.name .. ": " .. fromLabel .. " → " .. toLabel, 1)
+        if responded then return end
+        responded = true
+        if status == 200 and body then
+            hs.alert.show(mon.name .. ": " .. body, 1)
+        elseif status == 200 then
+            hs.alert.show(mon.name .. ": toggled", 1)
         else
             hs.alert.show(mon.name .. " remote failed (HTTP " .. tostring(status) .. ")", 1.5)
         end
         releaseLock(mon)
     end)
-end
-
--- BetterDisplay input switching (for DisplayLink displays)
-local function betterDisplaySwitch(mon)
-    local fromLabel, toLabel = resolveToggle(mon, lastKnownInput[mon.name])
-    local writeValue = mon.writeMap[toLabel]
-    local url = string.format(
-        "http://localhost:55777/set?namelike=%s&ddc=%d&vcp=inputSelect",
-        mon.bdName, writeValue
-    )
-    hs.http.asyncGet(url, nil, function(status)
-        if status == 200 then
-            lastKnownInput[mon.name] = toLabel
-            hs.alert.show(mon.name .. ": " .. fromLabel .. " → " .. toLabel, 1)
-        else
-            hs.alert.show(mon.name .. " BD failed (HTTP " .. tostring(status) .. ")", 1.5)
-        end
+    -- Timeout: release lock if PC is unreachable
+    hs.timer.doAfter(REMOTE_TIMEOUT_SEC, function()
+        if responded then return end
+        responded = true
+        print("[monitor] " .. mon.name .. ": remote timeout")
+        hs.alert.show(mon.name .. ": PC unreachable", 1.5)
         releaseLock(mon)
     end)
 end
 
--- DDC read-then-toggle via m1ddc
+-- DDC toggle via m1ddc (direct write, no read — faster and avoids read hangs)
 local function ddcToggle(mon)
-    hs.task.new(m1ddc, function(exitCode, stdOut)
-        local currentInput = nil
-        if exitCode == 0 and stdOut then
-            local rawValue = tonumber(stdOut:match("%d+"))
-            if rawValue then rawValue = rawValue % 256 end
-            if rawValue and mon.readMap[rawValue] then
-                currentInput = mon.readMap[rawValue]
-            end
-        end
-        local fromLabel, toLabel = resolveToggle(mon, currentInput)
-        ddcWrite(mon, fromLabel, toLabel)
-    end, {"display", "uuid=" .. mon.uuid, "get", "input"}):start()
+    local fromLabel, toLabel = resolveToggle(mon, lastKnownInput[mon.name])
+    ddcWrite(mon, fromLabel, toLabel)
 end
 
 local function toggleMonitorInput(mon)
@@ -250,8 +241,6 @@ local function toggleMonitorInput(mon)
 
     if mon.remote then
         remoteSwitch(mon)
-    elseif mon.useBetterDisplay then
-        betterDisplaySwitch(mon)
     else
         ddcToggle(mon)
     end
@@ -270,12 +259,39 @@ local monitorTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(e
 end)
 monitorTap:start()
 
--- Watchdog: restart monitorTap if it stops (can happen after sleep/display changes)
+-- All eventtaps that need watchdog protection
+local allTaps = { monitorTap, voiceTap, remapShiftCmdV }
+
+-- Watchdog: restart eventtaps if they stop (can happen after sleep/display changes)
 hs.timer.doEvery(30, function()
-    if not monitorTap:isEnabled() then
-        print("[monitor] eventtap died — restarting")
-        monitorTap:start()
+    for _, tap in ipairs(allTaps) do
+        if not tap:isEnabled() then
+            print("[monitor] eventtap died — restarting")
+            tap:start()
+        end
     end
 end)
+
+-- Sleep/wake: clear stale locks and restart eventtaps
+local sleepWatcher = hs.caffeinate.watcher.new(function(event)
+    if event == hs.caffeinate.watcher.systemDidWake then
+        print("[monitor] system wake — resetting state")
+        for _, mon in pairs(monitors) do
+            monitorLocks[mon.name] = false
+            if monitorWatchdogs[mon.name] then
+                monitorWatchdogs[mon.name]:stop()
+                monitorWatchdogs[mon.name] = nil
+            end
+            lastSwitchTime[mon.name] = nil
+        end
+        -- Restart eventtaps after a short delay (system needs time to stabilize)
+        hs.timer.doAfter(2, function()
+            for _, tap in ipairs(allTaps) do
+                if not tap:isEnabled() then tap:start() end
+            end
+        end)
+    end
+end)
+sleepWatcher:start()
 
 hs.alert.show("Ready", 1)

@@ -171,8 +171,15 @@ HttpAccept() {
         return
     }
 
-    ; Parse GET /switch?monitor=S27&to=DP
-    if RegExMatch(data, "GET /switch\?monitor=(\w+)&to=(\w+)", &m) {
+    ; Parse GET /toggle?monitor=S27 (reads current input, toggles it)
+    ; Parse GET /switch?monitor=S27&to=DP (sets specific input)
+    if RegExMatch(data, "GET /toggle\?monitor=(\w+)", &m) {
+        monName := m[1]
+        result := RemoteToggle(monName, &body)
+        status := result ? "200 OK" : "400 Bad Request"
+        if !result
+            body := "FAIL"
+    } else if RegExMatch(data, "GET /switch\?monitor=(\w+)&to=(\w+)", &m) {
         monName := m[1]
         targetInput := m[2]
         result := RemoteSwitch(monName, targetInput)
@@ -186,6 +193,34 @@ HttpAccept() {
     response := "HTTP/1.1 " status "`r`nContent-Length: " StrLen(body) "`r`nConnection: close`r`n`r`n" body
     client.Send(response)
     client.Close()
+}
+
+RemoteToggle(monName, &body) {
+    global RemoteMap, Monitors
+    if !RemoteMap.Has(monName)
+        return false
+    rm := RemoteMap[monName]
+    cfg := Monitors[rm.index]
+
+    found := false
+    body := "FAIL"
+    EnumPhysicalMonitors(RemoteToggleCallback.Bind(cfg, &found, &body))
+    return found
+}
+
+RemoteToggleCallback(cfg, &found, &body, hMon, hPhys, desc) {
+    if found || !InStr(desc, cfg.name)
+        return
+    current := VCPGet(hPhys, 0x60)
+    if current = -1
+        return
+    target := (current = cfg.win) ? cfg.mac : cfg.win
+    if VCPSet(hPhys, 0x60, target) {
+        found := true
+        direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
+        body := direction
+        ShowTip(cfg.name " " direction " (remote)")
+    }
 }
 
 RemoteSwitch(monName, targetInput) {
