@@ -19,33 +19,102 @@ Monitors := [
 ^!Numpad2:: ToggleMonitor(2)
 ^!Numpad3:: ToggleMonitor(3)
 ^!F12::     ScanMonitors()
+^!F11::     CacheMonitorHandles()  ; Manual re-cache if monitors change
+
+; ============ HANDLE CACHE ============
+; Cache physical monitor handles at startup so hotkeys skip re-enumeration.
+; Maps monitor config name → {hPhys: handle}
+; Handles are NOT destroyed — kept alive for fast repeated access.
+; Press Ctrl+Alt+F11 to re-cache if monitors are plugged/unplugged.
+
+global HandleCache := Map()
+
+CacheMonitorHandles() {
+    global HandleCache, Monitors
+    ; Destroy any previously cached handles
+    for name, entry in HandleCache
+        DllCall("dxva2\DestroyPhysicalMonitor", "Ptr", entry.hPhys, "Int")
+    HandleCache := Map()
+
+    EnumPhysicalMonitors(CacheCallback, false)  ; false = don't destroy handles
+
+    cached := []
+    for name, _ in HandleCache
+        cached.Push(name)
+    if cached.Length
+        ShowTip("Cached " cached.Length " monitor(s): " ArrayJoin(cached, ", "))
+    else
+        ShowTip("No monitors found to cache!")
+}
+
+CacheCallback(hMon, hPhys, desc) {
+    global HandleCache, Monitors
+    for cfg in Monitors {
+        if InStr(desc, cfg.name) && !HandleCache.Has(cfg.name) {
+            HandleCache[cfg.name] := {hPhys: hPhys}
+            return
+        }
+    }
+}
+
+ArrayJoin(arr, sep) {
+    s := ""
+    for i, v in arr
+        s .= (i > 1 ? sep : "") . v
+    return s
+}
 
 ; ============ CORE ============
 
 ToggleMonitor(index) {
-    global Monitors
+    global Monitors, HandleCache
     cfg := Monitors[index]
-    found := false
-    EnumPhysicalMonitors(ToggleCallback.Bind(cfg, &found))
-    if !found
-        ShowTip("Monitor not found: " cfg.name)
-}
 
-ToggleCallback(cfg, &found, hMon, hPhys, desc) {
-    if found || !InStr(desc, cfg.name)
-        return
-    found := true
-    current := VCPGet(hPhys, 0x60)
-    if current = -1 {
-        ShowTip(cfg.name ": failed to read input")
+    ; Fast path: use cached handle
+    if HandleCache.Has(cfg.name) {
+        hPhys := HandleCache[cfg.name].hPhys
+        current := VCPGet(hPhys, 0x60)
+        if current != -1 {
+            target := (current = cfg.win) ? cfg.mac : cfg.win
+            direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
+            if VCPSet(hPhys, 0x60, target) {
+                ShowTip(cfg.name " " direction)
+            } else {
+                ShowTip(cfg.name ": set failed, re-caching...")
+                CacheMonitorHandles()
+            }
+            return
+        }
+        ; Read failed — handle may be stale, fall through to re-cache
+        ShowTip(cfg.name ": stale handle, re-caching...")
+        CacheMonitorHandles()
+        ; Retry once with fresh handle
+        if HandleCache.Has(cfg.name) {
+            hPhys := HandleCache[cfg.name].hPhys
+            current := VCPGet(hPhys, 0x60)
+            if current != -1 {
+                target := (current = cfg.win) ? cfg.mac : cfg.win
+                direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
+                if VCPSet(hPhys, 0x60, target)
+                    ShowTip(cfg.name " " direction)
+                else
+                    ShowTip(cfg.name ": failed to set input")
+            } else {
+                ShowTip(cfg.name ": failed to read input")
+            }
+        } else {
+            ShowTip("Monitor not found: " cfg.name)
+        }
         return
     }
-    target := (current = cfg.win) ? cfg.mac : cfg.win
-    direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
-    if VCPSet(hPhys, 0x60, target)
-        ShowTip(cfg.name " " direction)
-    else
-        ShowTip(cfg.name ": failed to set input")
+
+    ; No cache entry — try to cache and retry
+    CacheMonitorHandles()
+    if HandleCache.Has(cfg.name) {
+        ToggleMonitor(index)  ; Retry with cache
+    } else {
+        ShowTip("Monitor not found: " cfg.name)
+    }
 }
 
 ScanMonitors() {
@@ -95,8 +164,9 @@ VCPSet(hPhysMon, code, value) {
 ; ============ ENUMERATION ============
 
 ; Calls fn(hMonitor, hPhysicalMonitor, description) for each physical monitor.
-; Handles all allocation and cleanup.
-EnumPhysicalMonitors(fn) {
+; If destroyHandles is true (default), handles are cleaned up after the callback.
+; Pass false when caching handles for reuse.
+EnumPhysicalMonitors(fn, destroyHandles := true) {
     ; Collect hMonitor handles first (can't nest callbacks easily)
     hMonitors := []
     enumCb := CallbackCreate(CollectMonitors.Bind(hMonitors), "Fast", 4)
@@ -122,7 +192,8 @@ EnumPhysicalMonitors(fn) {
             hPhys := NumGet(physArr, offset, "Ptr")
             desc := StrGet(physArr.Ptr + offset + 8, 128, "UTF-16")
             fn(hMon, hPhys, desc)
-            DllCall("dxva2\DestroyPhysicalMonitor", "Ptr", hPhys, "Int")
+            if destroyHandles
+                DllCall("dxva2\DestroyPhysicalMonitor", "Ptr", hPhys, "Int")
         }
     }
 }
@@ -196,56 +267,70 @@ HttpAccept() {
 }
 
 RemoteToggle(monName, &body) {
-    global RemoteMap, Monitors
+    global RemoteMap, Monitors, HandleCache
     if !RemoteMap.Has(monName)
         return false
     rm := RemoteMap[monName]
     cfg := Monitors[rm.index]
 
-    found := false
-    body := "FAIL"
-    EnumPhysicalMonitors(RemoteToggleCallback.Bind(cfg, &found, &body))
-    return found
-}
+    if !HandleCache.Has(cfg.name)
+        CacheMonitorHandles()
+    if !HandleCache.Has(cfg.name)
+        return false
 
-RemoteToggleCallback(cfg, &found, &body, hMon, hPhys, desc) {
-    if found || !InStr(desc, cfg.name)
-        return
+    hPhys := HandleCache[cfg.name].hPhys
     current := VCPGet(hPhys, 0x60)
-    if current = -1
-        return
+    if current = -1 {
+        CacheMonitorHandles()
+        if !HandleCache.Has(cfg.name)
+            return false
+        hPhys := HandleCache[cfg.name].hPhys
+        current := VCPGet(hPhys, 0x60)
+        if current = -1
+            return false
+    }
     target := (current = cfg.win) ? cfg.mac : cfg.win
     if VCPSet(hPhys, 0x60, target) {
-        found := true
         direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
         body := direction
         ShowTip(cfg.name " " direction " (remote)")
+        return true
     }
+    return false
 }
 
 RemoteSwitch(monName, targetInput) {
-    global RemoteMap
+    global RemoteMap, Monitors, HandleCache
     if !RemoteMap.Has(monName)
         return false
     rm := RemoteMap[monName]
     if !rm.inputs.Has(targetInput)
         return false
     targetValue := rm.inputs[targetInput]
-
-    found := false
     cfg := Monitors[rm.index]
-    EnumPhysicalMonitors(RemoteSwitchCallback.Bind(cfg, targetValue, &found))
-    return found
-}
 
-RemoteSwitchCallback(cfg, targetValue, &found, hMon, hPhys, desc) {
-    if found || !InStr(desc, cfg.name)
-        return
+    if !HandleCache.Has(cfg.name)
+        CacheMonitorHandles()
+    if !HandleCache.Has(cfg.name)
+        return false
+
+    hPhys := HandleCache[cfg.name].hPhys
     if VCPSet(hPhys, 0x60, targetValue) {
-        found := true
         direction := (targetValue = cfg.mac) ? "→ Mac (remote)" : "→ Windows (remote)"
         ShowTip(cfg.name " " direction)
+        return true
     }
+    ; Retry with fresh handle
+    CacheMonitorHandles()
+    if !HandleCache.Has(cfg.name)
+        return false
+    hPhys := HandleCache[cfg.name].hPhys
+    if VCPSet(hPhys, 0x60, targetValue) {
+        direction := (targetValue = cfg.mac) ? "→ Mac (remote)" : "→ Windows (remote)"
+        ShowTip(cfg.name " " direction)
+        return true
+    }
+    return false
 }
 
 ; ============ SOCKET CLASS (minimal TCP wrapper) ============
@@ -319,6 +404,7 @@ class Socket {
     }
 }
 
+CacheMonitorHandles()
 StartHttpServer()
 
 ; ============ UTILITY ============
