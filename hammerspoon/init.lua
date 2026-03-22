@@ -126,7 +126,7 @@ local monitors = {
 local monitorLocks = {}      -- name → true if locked
 local monitorWatchdogs = {}  -- name → hs.timer (watchdog for stuck operations)
 local COOLDOWN_SEC = 0.5     -- debounce cooldown after lock release
-local WATCHDOG_SEC = 5       -- max time before force-unlocking (read + write)
+local WATCHDOG_SEC = 8       -- max time before force-unlocking (read + write + repeats)
 local lastSwitchTime = {}    -- name → hs.timer.secondsSinceEpoch() of last unlock
 
 local function acquireLock(mon)
@@ -213,24 +213,50 @@ local function parseDDCInput(mon, rawVal)
 end
 
 -- DDC write: switch monitor to target input
+-- For blindToggle monitors, send the command multiple times since DDC writes are also flaky
+local DDC_WRITE_REPEATS = 3
+local DDC_WRITE_DELAY = 0.15  -- seconds between repeated writes
+
+local function ddcWriteSingle(mon, writeValue, callback)
+    local task = hs.task.new(m1ddc, callback,
+        {"display", "uuid=" .. mon.uuid, "set", "input", tostring(writeValue)})
+    if task then
+        task:start()
+    else
+        callback(-1, nil, nil)
+    end
+end
+
 local function ddcWrite(mon, currentInput, targetInput)
     local writeValue = mon.writeMap[targetInput]
-    print("[monitor] " .. mon.name .. ": switching " .. currentInput .. " → " .. targetInput .. " (DDC " .. tostring(writeValue) .. ")")
-    local writeTask = hs.task.new(m1ddc, function(wExitCode)
-        if wExitCode == 0 then
-            hs.alert.show(mon.name .. ": " .. currentInput .. " → " .. targetInput, 1)
-            -- Update blind state tracker
-            blindState[mon.name] = targetInput
-        else
-            hs.alert.show(mon.name .. ": write failed", 1.5)
-        end
-        releaseLock(mon)
-    end, {"display", "uuid=" .. mon.uuid, "set", "input", tostring(writeValue)})
-    if writeTask then
-        writeTask:start()
-    else
-        hs.alert.show(mon.name .. ": m1ddc not found", 1.5)
-        releaseLock(mon)
+    local repeats = mon.blindToggle and DDC_WRITE_REPEATS or 1
+    print("[monitor] " .. mon.name .. ": switching " .. currentInput .. " → " .. targetInput .. " (DDC " .. tostring(writeValue) .. ", repeats=" .. repeats .. ")")
+
+    -- Update blind state immediately (before writes complete) to avoid toggle desync
+    blindState[mon.name] = targetInput
+
+    local function writeAttempt(i)
+        ddcWriteSingle(mon, writeValue, function(wExitCode)
+            if i == 1 then
+                -- Report result on first write
+                if wExitCode == 0 then
+                    hs.alert.show(mon.name .. ": " .. currentInput .. " → " .. targetInput, 1)
+                else
+                    hs.alert.show(mon.name .. ": write failed", 1.5)
+                end
+            end
+            if i >= repeats then
+                releaseLock(mon)
+            end
+        end)
+    end
+
+    -- Send first write immediately, then repeat with delays
+    writeAttempt(1)
+    for i = 2, repeats do
+        hs.timer.doAfter(DDC_WRITE_DELAY * (i - 1), function()
+            writeAttempt(i)
+        end)
     end
 end
 
