@@ -10,7 +10,7 @@ Persistent
 ; Run scan mode (Ctrl+Alt+F12) to discover/verify input codes
 Monitors := [
     {name: "G2724D",   win: 0x0F, mac: 0x13},  ; Dell G2724D:   DP1 (0x0F) ↔ DP2 (0x13)
-    {name: "S2721DGF", win: 0x0F, mac: 0x12},  ; Dell S2721DGF: DP  (0x0F) ↔ HDMI2 (0x12)
+    {name: "S2721DGF", win: 0x0F, mac: 0x11},  ; Dell S2721DGF: DP  (0x0F) ↔ HDMI1 (0x11)
     {name: "U3225QE",  win: 0x19, mac: 0x11},   ; Dell U3225QE:  TB4 (0x19) ↔ HDMI1 (0x11)
 ]
 
@@ -138,7 +138,7 @@ HttpPort := 9867
 
 ; Monitor name mapping: Mac name → {AHK config index, input name → VCP value}
 RemoteMap := Map(
-    "S27", {index: 2, inputs: Map("DP", 0x0F, "HDMI", 0x12)},
+    "S27", {index: 2, inputs: Map("DP", 0x0F, "HDMI", 0x11)},
     "G27", {index: 1, inputs: Map("DP1", 0x0F, "DP2", 0x13)},
     "U32", {index: 3, inputs: Map("TB4", 0x19, "HDMI", 0x11)},
 )
