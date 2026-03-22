@@ -92,39 +92,27 @@ end)
 remapShiftCmdV:start()
 
 -- ============================================
--- Monitor Input Switching via DDC (m1ddc)
+-- Monitor Input Switching (all via Windows PC)
 -- ============================================
-local m1ddc = "/opt/homebrew/bin/m1ddc"
+-- All monitors are switched via HTTP to the Windows PC, which handles
+-- DDC reads/writes reliably. m1ddc on Mac only supports USB-C/DP Alt
+-- Mode, so HDMI (U32) and DisplayLink (S27) don't work, and even
+-- USB-C (G27) reads are flaky. Windows DDC works for all three.
+
+local REMOTE_HOST = "192.168.1.104"
+local REMOTE_PORT = 9867
 
 local monitors = {
-    g27 = {
-        name = "G27",
-        uuid = "C8F0D4ED-3C53-41B0-AEED-58C787AA305A",
-        readMap = { [15] = "DP1", [110] = "DP1", [19] = "DP2" },
-        writeMap = { DP1 = 15, DP2 = 19 },
-        toggle = { DP1 = "DP2", DP2 = "DP1" },
-    },
-    s27 = {
-        name = "S27",
-        remote = true,  -- DisplayLink: DDC not supported, switch via Windows PC
-        remoteHost = "192.168.1.104",
-        remotePort = 9867,
-        toggle = { HDMI = "DP", DP = "HDMI" },
-    },
-    u32 = {
-        name = "U32",
-        remote = true,  -- Mac connects via HDMI (no DDC support); switch via Windows PC (TB4)
-        remoteHost = "192.168.1.104",
-        remotePort = 9867,
-        toggle = { HDMI = "TB4", TB4 = "HDMI" },
-    },
+    g27 = { name = "G27" },
+    s27 = { name = "S27" },
+    u32 = { name = "U32" },
 }
 
 -- Per-monitor lock
 local monitorLocks = {}      -- name → true if locked
 local monitorWatchdogs = {}  -- name → hs.timer (watchdog for stuck operations)
 local COOLDOWN_SEC = 0.5     -- debounce cooldown after lock release
-local WATCHDOG_SEC = 5       -- max time before force-unlocking (read + write)
+local WATCHDOG_SEC = 5       -- max time before force-unlocking
 local lastSwitchTime = {}    -- name → hs.timer.secondsSinceEpoch() of last unlock
 
 local function acquireLock(mon)
@@ -134,7 +122,6 @@ local function acquireLock(mon)
         hs.alert.show(name .. ": busy (locked)", 0.8)
         return false
     end
-    -- Debounce: reject if last switch was too recent
     if lastSwitchTime[name] and (hs.timer.secondsSinceEpoch() - lastSwitchTime[name]) < COOLDOWN_SEC then
         print("[monitor] " .. name .. ": REJECTED (cooldown)")
         hs.alert.show(name .. ": cooldown", 0.8)
@@ -142,13 +129,12 @@ local function acquireLock(mon)
     end
     print("[monitor] " .. name .. ": lock acquired")
     monitorLocks[name] = true
-    -- Watchdog: force-unlock after timeout so a stuck operation can't permanently lock
     monitorWatchdogs[name] = hs.timer.doAfter(WATCHDOG_SEC, function()
         if monitorLocks[name] then
             monitorLocks[name] = false
             lastSwitchTime[name] = hs.timer.secondsSinceEpoch()
             monitorWatchdogs[name] = nil
-            hs.alert.show(name .. ": watchdog unlock (m1ddc hung?)", 1.5)
+            hs.alert.show(name .. ": watchdog unlock", 1.5)
         end
     end)
     return true
@@ -164,12 +150,14 @@ local function releaseLock(mon)
     end
 end
 
--- Remote input switching (via HTTP to Windows PC)
--- Uses /toggle endpoint — Windows reads the current input and toggles it
+-- Toggle monitor input via HTTP to Windows PC
 local REMOTE_TIMEOUT_SEC = 2
-local function remoteSwitch(mon)
+
+local function toggleMonitorInput(mon)
+    if not acquireLock(mon) then return end
+
     local url = string.format("http://%s:%d/toggle?monitor=%s",
-        mon.remoteHost, mon.remotePort, mon.name)
+        REMOTE_HOST, REMOTE_PORT, mon.name)
     print("[monitor] " .. mon.name .. ": remote toggle request")
     local responded = false
     hs.http.asyncGet(url, nil, function(status, body)
@@ -191,93 +179,6 @@ local function remoteSwitch(mon)
         hs.alert.show(mon.name .. ": PC unreachable", 1.5)
         releaseLock(mon)
     end)
-end
-
--- Parse m1ddc DDC output: try high byte, low byte, then raw value
-local function parseDDCInput(mon, rawVal)
-    if not rawVal then return nil end
-    -- Try high byte (m1ddc combined format: current * 256 + max)
-    local hi = math.floor(rawVal / 256)
-    if hi > 0 and mon.readMap[hi] then return mon.readMap[hi], hi end
-    -- Try low byte (some monitors pack differently)
-    local lo = rawVal % 256
-    if lo > 0 and mon.readMap[lo] then return mon.readMap[lo], lo end
-    -- Try raw value directly (single-value format)
-    if mon.readMap[rawVal] then return mon.readMap[rawVal], rawVal end
-    return nil, nil
-end
-
--- DDC write: switch monitor to target input
-local function ddcWrite(mon, currentInput, targetInput)
-    local writeValue = mon.writeMap[targetInput]
-    print("[monitor] " .. mon.name .. ": switching " .. currentInput .. " → " .. targetInput .. " (DDC " .. tostring(writeValue) .. ")")
-    local writeTask = hs.task.new(m1ddc, function(wExitCode)
-        if wExitCode == 0 then
-            hs.alert.show(mon.name .. ": " .. currentInput .. " → " .. targetInput, 1)
-        else
-            hs.alert.show(mon.name .. ": write failed", 1.5)
-        end
-        releaseLock(mon)
-    end, {"display", "uuid=" .. mon.uuid, "set", "input", tostring(writeValue)})
-    if writeTask then
-        writeTask:start()
-    else
-        hs.alert.show(mon.name .. ": m1ddc not found", 1.5)
-        releaseLock(mon)
-    end
-end
-
--- DDC toggle with retry: read current input (up to DDC_MAX_RETRIES), then write the opposite
-local DDC_MAX_RETRIES = 5
-
-local function ddcReadWithRetry(mon, attempt)
-    if attempt > DDC_MAX_RETRIES then
-        print("[monitor] " .. mon.name .. ": all " .. DDC_MAX_RETRIES .. " DDC reads failed")
-        hs.alert.show(mon.name .. ": DDC read failed (retries exhausted)", 1.5)
-        releaseLock(mon)
-        return
-    end
-    local readTask = hs.task.new(m1ddc, function(exitCode, stdOut)
-        if exitCode == 0 and stdOut then
-            local rawVal = tonumber(stdOut:match("%d+"))
-            local currentInput, val = parseDDCInput(mon, rawVal)
-            if currentInput then
-                print("[monitor] " .. mon.name .. ": DDC raw=" .. tostring(rawVal) .. " → input " .. tostring(val) .. " (" .. currentInput .. ") [attempt " .. attempt .. "]")
-                local targetInput = mon.toggle[currentInput]
-                ddcWrite(mon, currentInput, targetInput)
-                return
-            else
-                print("[monitor] " .. mon.name .. ": unknown DDC value raw=" .. tostring(rawVal) .. " [attempt " .. attempt .. "/" .. DDC_MAX_RETRIES .. "]")
-            end
-        else
-            print("[monitor] " .. mon.name .. ": DDC read failed exit=" .. tostring(exitCode) .. " [attempt " .. attempt .. "/" .. DDC_MAX_RETRIES .. "]")
-        end
-        -- Retry after a short delay
-        hs.timer.doAfter(0.1, function()
-            ddcReadWithRetry(mon, attempt + 1)
-        end)
-    end, {"display", "uuid=" .. mon.uuid, "get", "input"})
-    if readTask then
-        readTask:start()
-    else
-        hs.alert.show(mon.name .. ": m1ddc not found", 1.5)
-        releaseLock(mon)
-    end
-end
-
--- DDC toggle: read current input, then write the opposite
-local function ddcToggle(mon)
-    ddcReadWithRetry(mon, 1)
-end
-
-local function toggleMonitorInput(mon)
-    if not acquireLock(mon) then return end
-
-    if mon.remote then
-        remoteSwitch(mon)
-    else
-        ddcToggle(mon)
-    end
 end
 
 -- Cmd+Alt+Numpad → Monitor input switching (eventtap, since hs.hotkey.bind is unreliable with numpad)
