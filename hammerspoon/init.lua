@@ -1,6 +1,38 @@
 -- Hammerspoon config
 
 -- ============================================
+-- File Logger (persists across reloads)
+-- ============================================
+local LOG_PATH = os.getenv("HOME") .. "/.hammerspoon/console.log"
+local LOG_MAX_SIZE = 512 * 1024  -- 512KB, rotate when exceeded
+
+local function log(msg)
+    local line = os.date("%Y-%m-%d %H:%M:%S") .. " " .. msg
+    print(line)
+    local f = io.open(LOG_PATH, "a")
+    if f then
+        f:write(line .. "\n")
+        f:close()
+    end
+end
+
+-- Rotate log if too large (check once at startup)
+local function rotateLog()
+    local f = io.open(LOG_PATH, "r")
+    if f then
+        local size = f:seek("end")
+        f:close()
+        if size > LOG_MAX_SIZE then
+            os.remove(LOG_PATH .. ".old")
+            os.rename(LOG_PATH, LOG_PATH .. ".old")
+        end
+    end
+end
+rotateLog()
+
+log("[init] ============ Hammerspoon config loading ============")
+
+-- ============================================
 -- Voice Dictation: F13 to toggle recording
 -- ============================================
 local voiceRecording = false
@@ -118,22 +150,23 @@ local lastSwitchTime = {}    -- name → hs.timer.secondsSinceEpoch() of last un
 local function acquireLock(mon)
     local name = mon.name
     if monitorLocks[name] then
-        print("[monitor] " .. name .. ": REJECTED (locked)")
+        log("[monitor] " .. name .. ": REJECTED (locked)")
         hs.alert.show(name .. ": busy (locked)", 0.8)
         return false
     end
     if lastSwitchTime[name] and (hs.timer.secondsSinceEpoch() - lastSwitchTime[name]) < COOLDOWN_SEC then
-        print("[monitor] " .. name .. ": REJECTED (cooldown)")
+        log("[monitor] " .. name .. ": REJECTED (cooldown)")
         hs.alert.show(name .. ": cooldown", 0.8)
         return false
     end
-    print("[monitor] " .. name .. ": lock acquired")
+    log("[monitor] " .. name .. ": lock acquired")
     monitorLocks[name] = true
     monitorWatchdogs[name] = hs.timer.doAfter(WATCHDOG_SEC, function()
         if monitorLocks[name] then
             monitorLocks[name] = false
             lastSwitchTime[name] = hs.timer.secondsSinceEpoch()
             monitorWatchdogs[name] = nil
+            log("[monitor] " .. name .. ": watchdog unlock (operation took >5s)")
             hs.alert.show(name .. ": watchdog unlock", 1.5)
         end
     end)
@@ -158,11 +191,12 @@ local function toggleMonitorInput(mon)
 
     local url = string.format("http://%s:%d/toggle?monitor=%s",
         REMOTE_HOST, REMOTE_PORT, mon.name)
-    print("[monitor] " .. mon.name .. ": remote toggle request")
+    log("[monitor] " .. mon.name .. ": remote toggle request")
     local responded = false
     hs.http.asyncGet(url, nil, function(status, body)
         if responded then return end
         responded = true
+        log("[monitor] " .. mon.name .. ": response HTTP " .. tostring(status) .. " body=" .. tostring(body))
         if status == 200 and body then
             hs.alert.show(mon.name .. ": " .. body, 1)
         elseif status == 200 then
@@ -175,7 +209,7 @@ local function toggleMonitorInput(mon)
     hs.timer.doAfter(REMOTE_TIMEOUT_SEC, function()
         if responded then return end
         responded = true
-        print("[monitor] " .. mon.name .. ": remote timeout")
+        log("[monitor] " .. mon.name .. ": remote timeout")
         hs.alert.show(mon.name .. ": PC unreachable", 1.5)
         releaseLock(mon)
     end)
@@ -188,7 +222,7 @@ local monitorTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(e
     local flags = e:getFlags()
     if not (flags.cmd and flags.alt) then return false end
     local monName = ({[83]="g27", [84]="s27", [85]="u32"})[code]
-    print("[monitor] keypress: numpad" .. (code - 82) .. " → " .. monName)
+    log("[monitor] keypress: numpad" .. (code - 82) .. " → " .. monName)
     toggleMonitorInput(monitors[monName])
     return true
 end)
@@ -199,11 +233,12 @@ local allTaps = { monitorTap, voiceTap, remapShiftCmdV }
 
 -- Force-restart all eventtaps (stop + start) to recover from stale CGEventTaps
 local function restartAllTaps(reason)
-    print("[eventtap] restarting all taps (" .. reason .. ")")
+    log("[eventtap] restarting all taps (" .. reason .. ")")
     for _, tap in ipairs(allTaps) do
         tap:stop()
         tap:start()
     end
+    log("[eventtap] all taps restarted")
 end
 
 -- Watchdog: force-restart eventtaps periodically (isEnabled() can't detect stale CGEventTaps)
@@ -212,10 +247,14 @@ hs.timer.doEvery(120, function()
 end)
 
 -- Screen config changes (e.g. DDC input switch causes display to disappear/reappear)
+-- Debounce: multiple screen events fire rapidly, only restart once after they settle
+local screenRestartTimer = nil
 local screenWatcher = hs.screen.watcher.new(function()
-    print("[eventtap] screen configuration changed — scheduling tap restart")
-    -- Delay to let macOS finish reconfiguring displays
-    hs.timer.doAfter(2, function()
+    log("[eventtap] screen configuration changed")
+    -- Cancel any pending restart, wait for events to settle
+    if screenRestartTimer then screenRestartTimer:stop() end
+    screenRestartTimer = hs.timer.doAfter(3, function()
+        screenRestartTimer = nil
         restartAllTaps("screen change")
     end)
 end)
@@ -224,7 +263,7 @@ screenWatcher:start()
 -- Sleep/wake: clear stale locks and restart eventtaps
 local sleepWatcher = hs.caffeinate.watcher.new(function(event)
     if event == hs.caffeinate.watcher.systemDidWake then
-        print("[monitor] system wake — resetting state")
+        log("[monitor] system wake — resetting state")
         for _, mon in pairs(monitors) do
             monitorLocks[mon.name] = false
             if monitorWatchdogs[mon.name] then
@@ -240,12 +279,12 @@ local sleepWatcher = hs.caffeinate.watcher.new(function(event)
         end)
         -- Re-apply DDC brightness/contrast/color settings (they reset after sleep)
         hs.timer.doAfter(3, function()
-            print("[monitor] re-syncing DDC settings after wake")
+            log("[monitor] re-syncing DDC settings after wake")
             hs.task.new("/bin/bash", function(exitCode)
                 if exitCode == 0 then
-                    print("[monitor] sync-monitors.sh completed successfully")
+                    log("[monitor] sync-monitors.sh completed successfully")
                 else
-                    print("[monitor] sync-monitors.sh failed (exit " .. tostring(exitCode) .. ")")
+                    log("[monitor] sync-monitors.sh failed (exit " .. tostring(exitCode) .. ")")
                 end
             end, {"/Users/sean.smith/bin/sync-monitors.sh"}):start()
         end)
@@ -256,4 +295,5 @@ sleepWatcher:start()
 package.loaded["mic_monitor"] = nil
 micMonitor = require("mic_monitor")
 
+log("[init] config loaded successfully")
 hs.alert.show("Ready", 1)

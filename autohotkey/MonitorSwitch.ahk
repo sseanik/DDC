@@ -275,27 +275,34 @@ RemoteToggle(monName, &body) {
 
     if !HandleCache.Has(cfg.name)
         CacheMonitorHandles()
-    if !HandleCache.Has(cfg.name)
+    if !HandleCache.Has(cfg.name) {
+        body := "FAIL: monitor not found in cache"
         return false
+    }
 
     hPhys := HandleCache[cfg.name].hPhys
     current := VCPGet(hPhys, 0x60)
     if current = -1 {
         CacheMonitorHandles()
-        if !HandleCache.Has(cfg.name)
+        if !HandleCache.Has(cfg.name) {
+            body := "FAIL: monitor lost after re-cache"
             return false
+        }
         hPhys := HandleCache[cfg.name].hPhys
         current := VCPGet(hPhys, 0x60)
-        if current = -1
+        if current = -1 {
+            body := "FAIL: DDC read failed (got -1)"
             return false
+        }
     }
     target := (current = cfg.win) ? cfg.mac : cfg.win
+    direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
     if VCPSet(hPhys, 0x60, target) {
-        direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
         body := direction
-        ShowTip(cfg.name " " direction " (remote)")
+        ShowTip(cfg.name " " direction " (remote) [read=0x" Format("{:02X}", current) " target=0x" Format("{:02X}", target) "]")
         return true
     }
+    body := "FAIL: DDC write failed [read=0x" Format("{:02X}", current) " target=0x" Format("{:02X}", target) "]"
     return false
 }
 
