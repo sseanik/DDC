@@ -77,7 +77,7 @@ ToggleMonitor(index) {
         if current != -1 {
             target := (current = cfg.win) ? cfg.mac : cfg.win
             direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
-            if VCPSet(hPhys, 0x60, target) {
+            if VCPSetReliable(hPhys, 0x60, target) {
                 ShowTip(cfg.name " " direction)
             } else {
                 ShowTip(cfg.name ": set failed, re-caching...")
@@ -95,7 +95,7 @@ ToggleMonitor(index) {
             if current != -1 {
                 target := (current = cfg.win) ? cfg.mac : cfg.win
                 direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
-                if VCPSet(hPhys, 0x60, target)
+                if VCPSetReliable(hPhys, 0x60, target)
                     ShowTip(cfg.name " " direction)
                 else
                     ShowTip(cfg.name ": failed to set input")
@@ -159,6 +159,19 @@ VCPSet(hPhysMon, code, value) {
         , "UChar", code
         , "UInt", value
         , "Int")
+}
+
+; Repeated VCP write — DDC writes on some monitors (U32) report success but
+; don't actually switch. Sending the command multiple times fixes this.
+VCPSetReliable(hPhysMon, code, value, repeats := 3, delayMs := 150) {
+    ok := false
+    Loop repeats {
+        if VCPSet(hPhysMon, code, value)
+            ok := true
+        if A_Index < repeats
+            Sleep(delayMs)
+    }
+    return ok
 }
 
 ; ============ ENUMERATION ============
@@ -297,7 +310,7 @@ RemoteToggle(monName, &body) {
     }
     target := (current = cfg.win) ? cfg.mac : cfg.win
     direction := (current = cfg.win) ? "→ Mac" : "→ Windows"
-    if VCPSet(hPhys, 0x60, target) {
+    if VCPSetReliable(hPhys, 0x60, target) {
         body := direction
         ShowTip(cfg.name " " direction " (remote) [read=0x" Format("{:02X}", current) " target=0x" Format("{:02X}", target) "]")
         return true
@@ -322,7 +335,7 @@ RemoteSwitch(monName, targetInput) {
         return false
 
     hPhys := HandleCache[cfg.name].hPhys
-    if VCPSet(hPhys, 0x60, targetValue) {
+    if VCPSetReliable(hPhys, 0x60, targetValue) {
         direction := (targetValue = cfg.mac) ? "→ Mac (remote)" : "→ Windows (remote)"
         ShowTip(cfg.name " " direction)
         return true
@@ -332,7 +345,7 @@ RemoteSwitch(monName, targetInput) {
     if !HandleCache.Has(cfg.name)
         return false
     hPhys := HandleCache[cfg.name].hPhys
-    if VCPSet(hPhys, 0x60, targetValue) {
+    if VCPSetReliable(hPhys, 0x60, targetValue) {
         direction := (targetValue = cfg.mac) ? "→ Mac (remote)" : "→ Windows (remote)"
         ShowTip(cfg.name " " direction)
         return true

@@ -144,7 +144,7 @@ local monitors = {
 local monitorLocks = {}      -- name → true if locked
 local monitorWatchdogs = {}  -- name → hs.timer (watchdog for stuck operations)
 local COOLDOWN_SEC = 0.5     -- debounce cooldown after lock release
-local WATCHDOG_SEC = 5       -- max time before force-unlocking
+local WATCHDOG_SEC = 8       -- max time before force-unlocking (repeated DDC writes)
 local lastSwitchTime = {}    -- name → hs.timer.secondsSinceEpoch() of last unlock
 
 local function acquireLock(mon)
@@ -184,7 +184,7 @@ local function releaseLock(mon)
 end
 
 -- Toggle monitor input via HTTP to Windows PC
-local REMOTE_TIMEOUT_SEC = 2
+local REMOTE_TIMEOUT_SEC = 4
 
 local function toggleMonitorInput(mon)
     if not acquireLock(mon) then return end
