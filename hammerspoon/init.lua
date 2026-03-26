@@ -32,6 +32,9 @@ rotateLog()
 
 log("[init] ============ Hammerspoon config loading ============")
 
+-- Enable IPC so `hs` CLI commands work (e.g. `hs -c "hs.reload()"`)
+require("hs.ipc")
+
 -- ============================================
 -- Voice Dictation: F13 to toggle recording
 -- ============================================
@@ -122,6 +125,19 @@ local remapShiftCmdV = hs.eventtap.new({hs.eventtap.event.types.keyDown}, functi
     return false
 end)
 remapShiftCmdV:start()
+
+-- ============================================
+-- Heartbeat (defined early so eventtaps can use it)
+-- ============================================
+local HEARTBEAT_PATH = os.getenv("HOME") .. "/.hammerspoon/heartbeat"
+
+local function writeHeartbeat()
+    local f = io.open(HEARTBEAT_PATH, "w")
+    if f then
+        f:write(tostring(math.floor(hs.timer.secondsSinceEpoch())))
+        f:close()
+    end
+end
 
 -- ============================================
 -- Monitor Input Switching (all via Windows PC)
@@ -221,6 +237,7 @@ local monitorTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(e
     if code ~= 83 and code ~= 84 and code ~= 85 then return false end
     local flags = e:getFlags()
     if not (flags.cmd and flags.alt) then return false end
+    writeHeartbeat()  -- eventtap heartbeat (survives timer GC)
     local monName = ({[83]="g27", [84]="s27", [85]="u32"})[code]
     log("[monitor] keypress: numpad" .. (code - 82) .. " → " .. monName)
     toggleMonitorInput(monitors[monName])
@@ -241,24 +258,22 @@ local function restartAllTaps(reason)
     log("[eventtap] all taps restarted")
 end
 
--- Watchdog: force-restart eventtaps periodically (isEnabled() can't detect stale CGEventTaps)
-hs.timer.doEvery(120, function()
-    restartAllTaps("periodic")
-end)
+-- Write initial heartbeat immediately
+writeHeartbeat()
 
--- Screen config changes (e.g. DDC input switch causes display to disappear/reappear)
--- Debounce: multiple screen events fire rapidly, only restart once after they settle
-local screenRestartTimer = nil
-local screenWatcher = hs.screen.watcher.new(function()
-    log("[eventtap] screen configuration changed")
-    -- Cancel any pending restart, wait for events to settle
-    if screenRestartTimer then screenRestartTimer:stop() end
-    screenRestartTimer = hs.timer.doAfter(3, function()
-        screenRestartTimer = nil
-        restartAllTaps("screen change")
+-- IMPORTANT: all timer refs stored in globals to prevent GC from killing them.
+-- Defer timer creation so the NSRunLoop is fully initialized before registering timers.
+_G._heartbeatTimer = nil
+_G._tapRestartTimer = nil
+_G._timerSetup = hs.timer.doAfter(2, function()
+    _G._heartbeatTimer = hs.timer.doEvery(15, writeHeartbeat)
+    _G._tapRestartTimer = hs.timer.doEvery(120, function()
+        writeHeartbeat()
+        restartAllTaps("periodic")
     end)
+    writeHeartbeat()
+    log("[init] timers started (heartbeat=15s, tap-restart=120s)")
 end)
-screenWatcher:start()
 
 -- Sleep/wake: clear stale locks and restart eventtaps
 local sleepWatcher = hs.caffeinate.watcher.new(function(event)

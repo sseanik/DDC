@@ -261,8 +261,6 @@ HttpAccept() {
         monName := m[1]
         result := RemoteToggle(monName, &body)
         status := result ? "200 OK" : "400 Bad Request"
-        if !result
-            body := "FAIL"
     } else if RegExMatch(data, "GET /switch\?monitor=(\w+)&to=(\w+)", &m) {
         monName := m[1]
         targetInput := m[2]
