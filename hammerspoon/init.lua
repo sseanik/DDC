@@ -218,7 +218,7 @@ local function toggleMonitorInput(mon)
         elseif status == 200 then
             hs.alert.show(mon.name .. ": toggled", 1)
         else
-            hs.alert.show(mon.name .. " remote failed (HTTP " .. tostring(status) .. ")", 1.5)
+            hs.alert.show(mon.name .. ": " .. (body or "remote failed (HTTP " .. tostring(status) .. ")"), 1.5)
         end
         releaseLock(mon)
     end)

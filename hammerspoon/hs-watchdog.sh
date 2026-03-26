@@ -1,6 +1,6 @@
 #!/bin/bash
 # External watchdog for Hammerspoon.
-# Checks the heartbeat file; if stale (>90s), kills and relaunches Hammerspoon.
+# Checks the heartbeat file; if stale (>45s), kills and relaunches Hammerspoon.
 # URL scheme and IPC don't work when the run loop is frozen, so we must kill it.
 # Installed as a launchd agent — see com.user.hammerspoon-watchdog.plist.
 
