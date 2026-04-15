@@ -147,7 +147,7 @@ end
 -- Mode, so HDMI (U32) and DisplayLink (S27) don't work, and even
 -- USB-C (G27) reads are flaky. Windows DDC works for all three.
 
-local REMOTE_HOST = "192.168.1.104"
+local REMOTE_HOST = "192.168.1.10"
 local REMOTE_PORT = 9867
 
 local monitors = {
@@ -200,7 +200,7 @@ local function releaseLock(mon)
 end
 
 -- Toggle monitor input via HTTP to Windows PC
-local REMOTE_TIMEOUT_SEC = 4
+local REMOTE_TIMEOUT_SEC = 8
 
 local function toggleMonitorInput(mon)
     if not acquireLock(mon) then return end

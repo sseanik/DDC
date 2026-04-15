@@ -24,7 +24,7 @@
 local M = {}
 
 -- ── Configuration ──────────────────────────────────────────────────────
-local HA_BASE     = "http://192.168.1.104:9123"
+local HA_BASE     = "http://192.168.1.10:9123"
 local HA_TOKEN    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI4M2M1NTZjYjAzMjU0YTVkYWMxNzY3N2MwY2FkYjQwYSIsImlhdCI6MTc3MzcxOTY4MywiZXhwIjoyMDg5MDc5NjgzfQ.LIdiqZAqkjhVK0B3yTnbxtnhe8J1ePQIEgD4ktDuPGs"
 local HA_NOTIFY   = HA_BASE .. "/api/services/notify/mobile_app_s26plus"
 local HA_HEADERS  = {

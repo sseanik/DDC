@@ -138,6 +138,20 @@ ScanCallback(&output, hMon, hPhys, desc) {
 }
 
 
+; ============ GPU WAKE ============
+; When all monitors show Mac input, the Windows GPU can sleep and TB4/USB-C
+; DDC links (U32) drop. Wake the GPU by simulating input before retrying.
+
+WakeGPU() {
+    ; Signal that the display is needed
+    DllCall("SetThreadExecutionState", "UInt", 0x00000002 | 0x00000001)  ; ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
+    ; Simulate mouse movement (0,0 delta = wake without moving cursor)
+    DllCall("user32\mouse_event", "UInt", 0x0001, "Int", 0, "Int", 0, "UInt", 0, "Ptr", 0)
+    ; Move it back to be safe
+    DllCall("user32\mouse_event", "UInt", 0x0001, "Int", 1, "Int", 0, "UInt", 0, "Ptr", 0)
+    DllCall("user32\mouse_event", "UInt", 0x0001, "Int", -1, "Int", 0, "UInt", 0, "Ptr", 0)
+}
+
 ; ============ DDC/CI ============
 
 VCPGet(hPhysMon, code) {
@@ -287,16 +301,25 @@ RemoteToggle(monName, &body) {
     if !HandleCache.Has(cfg.name)
         CacheMonitorHandles()
     if !HandleCache.Has(cfg.name) {
-        body := "FAIL: monitor not found in cache"
-        return false
+        ; Monitor not found — GPU may be asleep (common for U32 on TB4)
+        WakeGPU()
+        Sleep(2000)
+        CacheMonitorHandles()
+        if !HandleCache.Has(cfg.name) {
+            body := "FAIL: monitor not found (even after GPU wake)"
+            return false
+        }
     }
 
     hPhys := HandleCache[cfg.name].hPhys
     current := VCPGet(hPhys, 0x60)
     if current = -1 {
+        ; DDC read failed — handle may be stale or GPU asleep
+        WakeGPU()
+        Sleep(2000)
         CacheMonitorHandles()
         if !HandleCache.Has(cfg.name) {
-            body := "FAIL: monitor lost after re-cache"
+            body := "FAIL: monitor lost after GPU wake + re-cache"
             return false
         }
         hPhys := HandleCache[cfg.name].hPhys
@@ -329,8 +352,14 @@ RemoteSwitch(monName, targetInput) {
 
     if !HandleCache.Has(cfg.name)
         CacheMonitorHandles()
-    if !HandleCache.Has(cfg.name)
-        return false
+    if !HandleCache.Has(cfg.name) {
+        ; GPU may be asleep — wake and retry
+        WakeGPU()
+        Sleep(2000)
+        CacheMonitorHandles()
+        if !HandleCache.Has(cfg.name)
+            return false
+    }
 
     hPhys := HandleCache[cfg.name].hPhys
     if VCPSetReliable(hPhys, 0x60, targetValue) {
@@ -338,7 +367,9 @@ RemoteSwitch(monName, targetInput) {
         ShowTip(cfg.name " " direction)
         return true
     }
-    ; Retry with fresh handle
+    ; Retry: wake GPU, re-cache, try again
+    WakeGPU()
+    Sleep(2000)
     CacheMonitorHandles()
     if !HandleCache.Has(cfg.name)
         return false
